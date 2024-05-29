@@ -1,0 +1,465 @@
+---
+title: "Bloom Stages - Hierarchical Clustering"
+author: "Katelynn"
+date: "2024-05-29"
+output: html_document
+---
+
+
+# Analysis Aims: 
+
+Use hierarchical clustering methods to separate different cyanobacteria bloom stages. In this analysis I take two approaches: 
+
+1. Clustering based off of phytoplankton genera
+2. Clustering based on phycocyanin, chlorophyll, and their respective daily rates of change.
+
+
+## Load Libraries
+
+```{r}
+library(vegan)
+library(BiodiversityR)
+library(ggrepel)
+library(factoextra)
+library(tidyverse)
+
+```
+
+
+# Clustering using Phytoplankton Taxa
+
+For this I want to cluster based on Phytoplankton, but also the Seston Nutrients. I think that will help clearly define the growth stages of the blooms. 
+
+### Missisquoi Bay
+
+```{r}
+
+MB_Phyto_Keep <- Phytos %>%
+  filter(Station == "MB") %>%
+  group_by(Sample_ID, SampleDate, Genus) %>%
+  summarize(RA_BM = sum(RA_BM)) %>%
+  mutate(Keep = if_else(RA_BM >= 0.05, "Yes", "No")) %>%
+  ungroup() %>%
+  select(Genus, Keep) %>%
+  filter(Keep=="Yes") %>%
+  unique()
+
+MB_Phyto_Matrix <- Phytos %>%
+  filter(Station == "MB") %>%
+  filter(Genus %in% MB_Phyto_Keep$Genus) %>%
+  select(SampleDate, Genus, BM_ug.L) %>%
+  group_by(SampleDate, Genus) %>%
+  summarise(BM = sum(BM_ug.L)) %>%
+  pivot_wider(names_from = "Genus", values_from="BM") %>%
+  filter(SampleDate > as.Date("2021-06-01")) %>%
+  rename(Date = SampleDate)
+
+MB_Phyto_Matrix[is.na(MB_Phyto_Matrix)] <- 0
+
+MB_Seston_Matrix <- All_Combined %>%
+  select(SestonP_uML, SestonC_uML, SestonN_uML, Station, Date) %>%
+  filter(Station == "MB") %>%
+  unique() %>%
+  mutate(Seston_CP = SestonC_uML/SestonP_uML,
+         Seston_CN = SestonC_uML/SestonN_uML, 
+         Seston_NP = SestonN_uML/SestonP_uML) %>%
+  na.omit() %>%
+  select(-SestonP_uML, -SestonC_uML, -SestonN_uML, -Station) %>%
+  mutate(Date = ymd(Date))
+
+MB_Phyto_Matrix <- left_join(MB_Phyto_Matrix, MB_Seston_Matrix) %>%
+  column_to_rownames(var="Date") %>% 
+  na.omit()
+
+### Bray Curtis
+
+BC_MB <- vegdist(MB_Phyto_Matrix, method="bray")
+
+```
+
+### St. Albans Bay
+
+```{r}
+##### St. Albans
+
+SA_Phyto_Keep <- Phytos %>%
+  filter(Station == "SA") %>%
+  group_by(Sample_ID, SampleDate, Genus) %>%
+  summarize(RA_BM = sum(RA_BM)) %>%
+  mutate(Keep = if_else(RA_BM >= 0.05, "Yes", "No")) %>%
+  ungroup() %>%
+  select(Genus, Keep) %>%
+  filter(Keep=="Yes") %>%
+  unique()
+
+
+SA_Phyto_Matrix <- Phytos %>%
+  filter(Station == "SA") %>%
+  filter(Genus %in% MB_Phyto_Keep$Genus) %>%
+  select(SampleDate, Genus, BM_ug.L) %>%
+  group_by(SampleDate, Genus) %>%
+  summarise(BM = sum(BM_ug.L)) %>%
+  pivot_wider(names_from = "Genus", values_from="BM") %>%
+  filter(SampleDate > as.Date("2021-06-01")) %>%
+  rename(Date = SampleDate)
+
+
+SA_Phyto_Matrix[is.na(SA_Phyto_Matrix)] <- 0
+
+SA_Seston_Matrix <- All_Combined %>%
+  select(SestonP_uML, SestonC_uML, SestonN_uML, Station, Date) %>%
+  filter(Station == "SA") %>%
+  unique() %>%
+  mutate(Seston_CP = SestonC_uML/SestonP_uML,
+         Seston_CN = SestonC_uML/SestonN_uML, 
+         Seston_NP = SestonN_uML/SestonP_uML) %>%
+  na.omit() %>%
+  select(-SestonP_uML, -SestonC_uML, -SestonN_uML, -Station) %>%
+  mutate(Date = ymd(Date))
+
+
+SA_Phyto_Matrix <- left_join(SA_Phyto_Matrix, SA_Seston_Matrix) %>%
+  column_to_rownames(var="Date") %>% 
+  na.omit()
+### Bray Curtis
+
+BC_SA <- vegdist(SA_Phyto_Matrix, method="bray")
+
+```
+
+
+## Clustering the points based on the bray curtis dissimilarity matrix. 
+
+```{r}
+MB_clust <- hclust(BC_MB, method="ward.D2")  
+
+SA_clust <- hclust(BC_SA, method="ward.D2")
+
+plot(MB_clust, las = 1, 
+     main="Cluster diagram of MB Genus", 
+     xlab="Sample", 
+     ylab="Bray Curtis Dissimilarity")
+
+
+plot(SA_clust, las = 1, 
+     main="Cluster diagram of SA Genera", 
+     xlab="Sample", 
+     ylab="Bray Curtis Dissimilarity")
+
+```
+
+## Optimizing number of clusters.
+```{r}
+
+# Plot cluster results
+p1 <- fviz_nbclust(as.matrix(BC_MB), FUN = hcut, method = "wss",  k.max = 8) +
+  ggtitle("(A) Elbow method")
+
+p2 <- fviz_nbclust(as.matrix(BC_MB), FUN = hcut, method = "silhouette", k.max = 8) +
+  ggtitle("(B) Silhouette method")
+
+p3 <- fviz_nbclust(as.matrix(BC_MB), FUN = hcut, method = "gap_stat", k.max = 8) +
+  ggtitle("(C) Gap statistic")
+
+# Display plots side by side
+gridExtra::grid.arrange(p1, p2, p3, nrow = 1)
+
+
+## Cut the tree based on number of clusters
+
+
+fviz_dend(
+  MB_clust,
+  k = 2,
+  horiz = TRUE,
+  rect = TRUE,
+  rect_fill = TRUE,
+  rect_border = "jco",
+  k_colors = "jco",
+  cex = 1
+)
+
+
+# Plot cluster results
+p1 <- fviz_nbclust(as.matrix(BC_SA), FUN = hcut, method = "wss",  k.max = 8) +
+  ggtitle("(A) Elbow method")
+
+p2 <- fviz_nbclust(as.matrix(BC_SA), FUN = hcut, method = "silhouette", k.max = 8) +
+  ggtitle("(B) Silhouette method")
+
+p3 <- fviz_nbclust(as.matrix(BC_SA), FUN = hcut, method = "gap_stat", k.max = 8) +
+  ggtitle("(C) Gap statistic")
+
+# Display plots side by side
+gridExtra::grid.arrange(p1, p2, p3, nrow = 1)
+
+
+fviz_dend(
+  SA_clust,
+  k = 3,
+  horiz = TRUE,
+  rect = TRUE,
+  rect_fill = TRUE,
+  rect_border = "jco",
+  k_colors = "jco",
+  cex = 1
+)
+
+```
+
+
+## Plotting the clustered groups with phytoplankton dates to see what they might represent. 
+```{r}
+### Found color pallette through jco in ggsci
+
+Phytos %>%
+  filter(Station == "MB") %>%
+  filter(Genus %in% MB_Phyto_Keep$Genus) %>%
+  filter(Taxonomic_group == "Cyanobacteria") %>%
+  group_by(Date) %>%
+  summarise(BM = sum(BM_ug.L)) %>%
+  unique() %>%
+  filter(Date > as.Date("2021-06-01")) %>%
+  mutate(Group = if_else(Date == as.Date("2021-08-10") | Date == as.Date("2021-08-19") | Date == as.Date("2021-08-25") | Date == as.Date("2021-09-17") | Date == as.Date("2021-09-03") | Date == as.Date("2021-09-10"), 1, 0),
+         Group = if_else(Date == as.Date("2021-06-29") | Date == as.Date("2021-08-03") | Date == as.Date("2021-10-11"), 2, Group)) %>%
+  ggplot(aes(x=Date, y=BM)) +
+  geom_line() + 
+  geom_point(aes(color=as.character(Group))) + 
+  scale_color_manual(values=c("black", "#EFC000FF", "#0073C2FF")) +
+  theme_classic() 
+
+
+
+Phytos %>%
+  filter(Station == "SA") %>%
+  filter(Genus %in% SA_Phyto_Keep$Genus) %>%
+  filter(Taxonomic_group == "Cyanobacteria") %>%
+  group_by(Date) %>%
+  summarise(BM = sum(BM_ug.L)) %>%
+  unique() %>%
+  filter(Date > as.Date("2021-06-01")) %>%
+  mutate(Group = if_else(Date == as.Date("2021-08-13") | Date == as.Date("2021-07-27"), 1, 0),
+         Group = if_else(Date == as.Date("2021-08-19") | Date == as.Date("2021-08-03") | Date == as.Date("2021-09-03") | Date == as.Date("2021-08-26") | Date == as.Date("2021-09-17"), 2, Group),
+         Group = if_else(Date == as.Date("2021-07-22") | Date == as.Date("2021-07-13") | Date == as.Date("2021-10-11"), 3, Group)) %>%
+  ggplot(aes(x=Date, y=BM)) +
+  geom_line() + 
+  geom_point(aes(color=as.character(Group))) + 
+  scale_color_manual(values=c("black", "#0073C2FF", "#EFC000FF",  "#868686FF")) +
+  theme_classic()
+
+```
+
+Hierarchal clustering analyses was used to determine bloom periods from non-bloom periods in the phytoplankton genera data and seston nutrient data utilizing the bray-curtis dissmilarity between each sample. The number of clusters to use was verified using the elbow, silhouette and gap statistic methods. The methods did  not converge on the same number of clusters, but utilizing the elbow plot and the silhoutte plot, we landed on two main clusters to separate the season... The clusters grouped into right before and right after the bloom, and the  main bloom period. 
+
+St. Albans clustering wasn't as clear as Missisquoi Bays. Each graph indicated a different number of clusters to use to group the species data, ranging from 1-3 clusters. Therefore, we chose the 3 clusters, as it best separated the data into groups that we were looking for. The hierarchal clustering again created a group that included the main bloom period, with a clear beginning and end of the bloom, but the bloom period was split into two groups, which were mainly defined as having differences in Aulacoseira granulata relative abundance. 
+
+# Phycocyanin, CHL, Rate of Change, and 3 day prior conditions for Clustering/
+
+
+## Missisquoi Bay.
+```{r}
+
+#### Phycocyanin
+
+MB_PC_Matrix <- MB_Profiler %>%
+  filter(Month > 6 & Month < 10) %>%
+  select(PC_RFU,  Day, Month, Year, Chl_RFU) %>%
+  mutate(Date = make_date(Year, Month, Day)) %>%
+  group_by(Date) %>%
+  summarize(PC = mean(PC_RFU),
+            CHL = mean(Chl_RFU)) %>%
+  mutate(Lag3_PC = lag(PC, n=3L),
+         Lag3_CHL = lag(CHL, n=3L),
+         Lag1_PC = lag(PC),
+         Lag1_CHL = lag(CHL)) %>%
+  na.omit() %>%
+  mutate(ROC_PC = (PC-Lag1_PC)/Lag1_PC, 
+         ROC_CHL = (CHL-Lag1_CHL)/Lag1_CHL) %>%
+  select(Date, PC, CHL, Lag3_PC, Lag3_CHL, ROC_PC, ROC_CHL) %>%
+  column_to_rownames(var="Date") %>% 
+  na.omit()
+
+### Cluster Analysis. 
+
+MB_PC_Euc <- vegdist(MB_PC_Matrix, method="euclidean")
+
+
+MB_PC_clust <- hclust(MB_PC_Euc, method="ward.D2")  
+
+
+## Visualize Cluster
+
+
+plot(MB_PC_clust, las = 1, 
+     main="Cluster diagram of MB PC and CHL", 
+     xlab="Date", 
+     ylab="Euclidean Distance")
+
+```
+
+## Testing number of clusters
+
+
+```{r}
+
+# Plot cluster results
+p1_MB <- fviz_nbclust(as.matrix(MB_PC_Euc), FUN = hcut, method = "wss",  k.max = 10) +
+  ggtitle("(A) Elbow method")
+
+p2 <- fviz_nbclust(as.matrix(MB_PC_Euc), FUN = hcut, method = "silhouette", k.max = 10) +
+  ggtitle("(B) Silhouette method")
+
+p3 <- fviz_nbclust(as.matrix(MB_PC_Euc), FUN = hcut, method = "gap_stat", k.max = 10) +
+  ggtitle("(C) Gap statistic")
+
+# Display plots side by side
+MB_K <- gridExtra::grid.arrange(p1, p2, p3, nrow = 1)
+
+```
+
+```{r}
+fviz_dend(
+  MB_PC_clust,
+  k = 3,
+  horiz = TRUE,
+  rect = TRUE,
+  rect_fill = TRUE,
+  rect_border = "jco",
+  k_colors = "jco",
+  main = "A",
+  cex = 0.75,
+  ylab = "") +
+  theme_classic()
+
+
+
+```
+Extracting Groups and Coloring points based on them. 
+
+
+```{r}
+
+cut_avg <- cutree(MB_PC_clust, k = 4)
+
+MB_PC <- mutate(MB_PC_Matrix, cluster = cut_avg) %>%
+  rownames_to_column(var="Date")
+
+MB_PC %>%
+  ggplot(aes(x=as_date(Date), y=PC)) +
+  geom_line(color="black") +
+  geom_point(aes(group=as.factor(cluster), color=as.factor(cluster))) +
+  theme_classic()
+  
+MB_PC %>%
+  ggplot(aes(x=as_date(Date), y=CHL)) +
+  geom_line(color="black") +
+  geom_point(aes(group=as.factor(cluster), color=as.factor(cluster))) +
+  theme_classic()
+  
+
+```
+This clustering method did a really nice job of highlight periods of rapid growth change - so both the rapid increase and decrease...albeit it didn't capture the second bloom collapes (when you add an additional cluster it does), but thats because it was so rapid. K=4.
+
+
+## St. Albans
+
+```{r}
+
+#### Phycocyanin
+
+SA_PC_Matrix <- SA_Profiler %>%
+  filter(Month > 5 & Month < 12) %>%
+  select(PC_RFU, Day, Month, Year, Chl_RFU) %>%
+  mutate(Date = make_date(Year, Month, Day)) %>%
+  group_by(Date) %>%
+  summarize(PC = mean(PC_RFU),
+            CHL = mean(Chl_RFU)) %>%
+  mutate(Lag3_PC = lag(PC, n=3L),
+         Lag3_CHL = lag(CHL, n=3L),
+         Lag1_PC = lag(PC),
+         Lag1_CHL = lag(CHL)) %>%
+  na.omit() %>%
+  mutate(ROC_PC = (PC-Lag1_PC)/Lag1_PC, 
+         ROC_CHL = (CHL-Lag1_CHL)/Lag1_CHL) %>%
+  select(Date, PC, CHL, Lag3_PC, Lag3_CHL, ROC_PC, ROC_CHL) %>%
+  column_to_rownames(var="Date") %>% 
+  na.omit()
+
+### Cluster Analysis. 
+
+SA_PC_Euc <- vegdist(SA_PC_Matrix, method="euclidean")
+
+
+SA_PC_clust <- hclust(SA_PC_Euc, method="ward.D2")  
+
+
+
+## Visualize Cluster
+
+
+plot(SA_PC_clust, las = 1, 
+     main="Cluster diagram of MB PC and CHL", 
+     xlab="Date", 
+     ylab="Euclidean Distance")
+
+```
+
+```{r}
+fviz_dend(
+  SA_PC_clust,
+  k = 3,
+  horiz = TRUE,
+  rect = TRUE,
+  rect_fill = TRUE,
+  rect_border = "jco",
+  k_colors = "jco",
+  main = "A",
+  cex = 0.75,
+  ylab = "") +
+  theme_classic()
+
+
+
+```
+Extracting Groups and Coloring points based on them. 
+
+## Testing the number of clusters.
+
+```{r}
+
+# Plot cluster results
+p1_SA <- fviz_nbclust(as.matrix(SA_PC_Euc), FUN = hcut, method = "wss",  k.max = 10) +
+  ggtitle("(A) Elbow method")
+
+p2 <- fviz_nbclust(as.matrix(SA_PC_Euc), FUN = hcut, method = "silhouette", k.max = 10) +
+  ggtitle("(B) Silhouette method")
+
+p3 <- fviz_nbclust(as.matrix(SA_PC_Euc), FUN = hcut, method = "gap_stat", k.max = 10) +
+  ggtitle("(C) Gap statistic")
+
+# Display plots side by side
+gridExtra::grid.arrange(p1, p2, nrow = 1)
+
+```
+```{r}
+cut_avg <- cutree(SA_PC_clust, k =3)
+
+SA_PC <- mutate(SA_PC_Matrix, cluster = cut_avg) %>%
+  rownames_to_column(var="Date")
+
+SA_PC %>%
+  ggplot(aes(x=as_date(Date), y=PC)) +
+  geom_line(color="black") +
+  geom_point(aes(group=as.factor(cluster), color=as.factor(cluster))) +
+  theme_classic()
+  
+SA_PC %>%
+  ggplot(aes(x=as_date(Date), y=CHL)) +
+  geom_line(color="black") +
+  geom_point(aes(group=as.factor(cluster), color=as.factor(cluster))) +
+  theme_classic()
+  
+
+```
+
+

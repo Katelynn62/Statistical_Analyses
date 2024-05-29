@@ -1,0 +1,635 @@
+---
+title: "Distance-based Redundancy Analysis"
+author: "Katelynn"
+date: "2024-05-29"
+output: html_document
+---
+
+#### RDA Analysis on Drivers of Bloom Dynamics: 
+
+Next for this analysis, I want to specify the drivers of cyanobacteria species...
+
+- Select Cyanobacteria Species
+- Select Environmental Variables
+-- Wind Speed, Stability, Surface PAR, (DN, DP - eventually) TDN, DOC, Turbidity, Seston CN, Seston CP, MC_Q, ATX_Q
+
+## Load Libraries
+```{r}
+
+library(ggforce)
+library(vegan)
+library(ggrepel)
+library(BiodiversityR)
+library(cimir)
+library(ggpubr)
+library(factoextra)
+
+```
+
+## Missisquoi Bay
+
+```{r}
+
+## selecting phytoplankton that are > 5%
+
+MB_Phyto_Date <- Phytos %>%
+  filter(Station == "MB") %>%
+  select(SampleDate) %>%
+  unique()
+  
+MB_Phyto_Keep <- Phytos %>%
+  filter(Station == "MB") %>%
+  group_by(Sample_ID, SampleDate, Genus) %>%
+  summarize(RA_BM = sum(RA_BM)) %>%
+  mutate(Keep = if_else(RA_BM >= 0.05, "Yes", "No")) %>%
+  ungroup() %>%
+  select(Genus, Keep) %>%
+  filter(Keep=="Yes") %>%
+  unique()
+
+MB_Phyto_Matrix <- Phytos %>%
+  filter(Taxonomic_group == "Cyanobacteria") %>%
+  filter(Station == "MB") %>%
+  filter(Genus %in% MB_Phyto_Keep$Genus) %>%
+  select(SampleDate, Genus, BM_ug.L) %>%
+  group_by(SampleDate, Genus) %>%
+  summarise(BM = sum(BM_ug.L)) %>%
+  pivot_wider(names_from = "Genus", values_from="BM") %>%
+  filter(SampleDate > as.Date("2021-06-01")) %>%
+  rename(Date = SampleDate)
+
+MB_Phyto_Matrix[is.na(MB_Phyto_Matrix)] <- 0
+
+MB_Seston_Matrix <- All_Combined %>%
+  select(SestonP_uML, SestonC_uML, SestonN_uML, Station, Date) %>%
+  filter(Station == "MB") %>%
+  unique() %>%
+  mutate(Seston_CP = SestonC_uML/SestonP_uML,
+         Seston_CN = SestonC_uML/SestonN_uML, 
+         Seston_NP = SestonN_uML/SestonP_uML) %>%
+  na.omit() %>%
+  select(-SestonP_uML, -SestonC_uML, -SestonN_uML, -Station) %>%
+  mutate(Date = ymd(Date)) %>%
+    filter(Date %in% MB_Phyto_Date$SampleDate)
+
+## Weather Matrix
+
+MB_Wind_RDA <- MB_Met %>%
+  select(Wind_Speed, Date) %>%
+  filter(Date %in% MB_Phyto_Date$SampleDate) %>%
+  group_by(Date) %>%
+  summarize(Wind_Speed = mean(Wind_Speed))
+
+MB_SS_RDA <- MB_Schmidt %>%
+  mutate(Day = day(datetime),
+         Month = month(datetime),
+         Year = year(datetime),
+         Date = make_date(Year, Month, Day)) %>%
+  select(SS, Date) %>%
+  filter(Date %in% MB_Phyto_Date$SampleDate) %>%
+  group_by(Date) %>%
+  summarize(SS = mean(SS))
+
+
+# Water Temp
+
+MB_WT_RDA <- MB_Profiler %>%
+  mutate(Day = day(datetime),
+         Month = month(datetime),
+         Year = year(datetime),
+         Date = make_date(Year, Month, Day)) %>%
+  select(Temp_C, Date) %>%
+  filter(Date %in% MB_Phyto_Date$SampleDate) %>%
+  group_by(Date) %>%
+  summarize(Temp_C = mean(Temp_C))
+
+# Sum Stream Flow
+MB_SF_RDA <- MB_SF_Stats %>%
+  select(Sum_SF, Date) %>%
+  filter(Date %in% MB_Phyto_Date$SampleDate) %>%
+  group_by(Date) %>%
+  summarize(Sum_SF = mean(Sum_SF)) 
+
+## Dissolved Nutrients. 
+
+DissNut_S <- read_xlsx("./DissolvedNutrients_2021.xlsx") %>%
+  filter(site == "Miss Bay") %>%
+  select(site, depth, rep, date, `NO3_mg/L`, `NH4_mg/L`, `PO4_mg/L`) %>%
+  mutate(Date = ymd(date),
+        depth = if_else(depth == "surface", "Surface", depth),
+        depth = if_else(depth == "bottom", "Bottom", depth)) %>%
+  mutate(NO3 = if_else(`NO3_mg/L` < 0, 0, `NO3_mg/L`),
+         NH4 = if_else(`NH4_mg/L`< 0, 0, `NH4_mg/L`),
+         PO4 = if_else(`PO4_mg/L` < 0, 0, `PO4_mg/L`),
+         NO3 = NO3 * 1000,
+         NH4 = NH4 * 1000,
+         PO4 = PO4 * 1000,
+         DIN = NO3 + NH4) %>%
+    na.omit() %>%
+  group_by(site, depth, Date) %>%
+  filter(depth=="Surface") %>%
+  summarize(NH4 = mean(NH4),
+            NO3 = mean(NO3),
+            PO4_S = mean(PO4),
+            DIN_S = mean(DIN)) %>%
+  ungroup() %>%
+  select(DIN_S, PO4_S, Date)
+
+DissNut_B <- read_xlsx("./DissolvedNutrients_2021.xlsx") %>%
+  filter(site == "Miss Bay") %>%
+  select(site, depth, rep, date, `NO3_mg/L`, `NH4_mg/L`, `PO4_mg/L`) %>%
+  mutate(Date = ymd(date),
+        depth = if_else(depth == "surface", "Surface", depth),
+        depth = if_else(depth == "bottom", "Bottom", depth)) %>%
+  mutate(NO3 = if_else(`NO3_mg/L` < 0, 0, `NO3_mg/L`),
+         NH4 = if_else(`NH4_mg/L`< 0, 0, `NH4_mg/L`),
+         PO4 = if_else(`PO4_mg/L` < 0, 0, `PO4_mg/L`),
+         NO3 = NO3 * 1000,
+         NH4 = NH4 * 1000,
+         PO4 = PO4 * 1000,
+         DIN = NO3 + NH4) %>%
+    na.omit() %>%
+  group_by(site, depth, Date) %>%
+  filter(depth=="Bottom") %>%
+  summarize(NH4 = mean(NH4),
+            NO3 = mean(NO3),
+            PO4_B = mean(PO4),
+            DIN_B = mean(DIN)) %>%
+  ungroup() %>%
+  select(DIN_B, PO4_B, Date)
+## Join together. 
+  
+MB_Env_RDA <- full_join(MB_SF_RDA, MB_Wind_RDA) %>%
+  full_join(., MB_WT_RDA) %>%
+  full_join(., MB_SS_RDA) %>%
+  full_join(., DissNut_S) %>%
+  full_join(., DissNut_B) %>%
+  #full_join(., MB_Seston_Matrix) %>%
+  na.omit()
+
+
+MB_Phyto_RDA <- MB_Phyto_Matrix %>%
+  filter(Date %in% MB_Env_RDA$Date) %>%
+  column_to_rownames(var="Date")
+
+MB_Phyto_RDA[is.na(MB_Phyto_RDA)] <- 0
+
+
+MB_Env_RDA <-   MB_Env_RDA %>%
+  rownames_to_column(var="Remove") %>%
+  select(-Remove) %>%
+  column_to_rownames(var="Date")
+```
+
+## Checking for Colinearity in Variables: 
+
+```{r}
+
+library(corrplot)
+
+MB_Corr = cor(MB_Env_RDA)
+corrplot(MB_Corr, method = 'number')
+
+corrplot::cor
+
+```
+Using a threshold of 0.75, we will remove Dissolved inorganic nitrogen in the bottom waters. Though the relationship between wind is really interestung. Suggesting internal N loading during low wind. 
+
+
+## Run RDA. 
+
+```{r}
+library(BiodiversityR)
+
+MB_Phyto_RDA <- MB_Phyto_RDA %>%
+  select(-coccoid_cyano, -Gloeotrichia) %>%
+  decostand("hellinger")
+
+MB_Env_RDA <- MB_Env_RDA %>%
+  decostand("standardize")
+
+
+MB_dbrda <- dbrda(MB_Phyto_RDA ~ .,
+                    data = MB_Env_RDA,
+                  distance="bray")
+
+print(MB_dbrda)
+
+anova.cca(MB_dbrda)
+
+```
+
+
+Forward selection of the RDA
+
+
+```{r}
+# Initial RDA with ALL of the environmental data
+MB_full <- dbrda(MB_Phyto_RDA ~ .,
+                    data = MB_Env_RDA, 
+                 distance="bray")
+
+MB_null <- dbrda(MB_Phyto_RDA ~ 1, data=MB_Env_RDA, 
+                 distance="bray")
+
+modAIC <- MASS::stepAIC(MB_null,direction='forward', scope = list(lower = MB_null,
+                                                              upper = MB_full))
+summary(modAIC)
+
+
+```
+After running the forward selection model, bottom orthophosphate levels are the only important variable in Missisquoi Bay in Shaping the cyanobacteria community. 
+
+## dbrda with selected variables
+```{r}
+MB_mod <- dbrda(MB_Phyto_RDA ~ PO4_B, data=MB_Env_RDA, 
+                 distance="bray")
+
+```
+
+```{r}
+library(BiodiversityR)
+
+MB_mod_summary <- summary(MB_mod)
+
+MB_mod_summary$concont
+```
+
+
+```{r}
+
+## This code adds species scores back into the dbrda, since they are always missing. That way we can plot species on our ordination plot with the sites and environmental variables. 
+
+sppscores(MB_mod) <- MB_Phyto_RDA
+
+plot <- ordiplot(MB_mod, type = "point")
+
+```
+
+I don't really care about the specific samples here, I rather want to see the species and the environmental factors. Therefore, I am going to extract each and re-make this ordination plot in a ggplot environment.
+
+```{r}
+# This code chunk extracts data from the dbRDA
+
+sites.long <- sites.long(plot, env.data=MB_Env_RDA) %>%
+  select(PO4_B, axis1, axis2, labels)
+
+axis.long <- axis.long(MB_mod, choices=c(1, 2))
+
+
+df <- colSums(MB_Phyto_RDA) %>%
+  as.data.frame() %>%
+  mutate(`.` = abs(`.`))
+
+species.long <- species.long(plot)
+species.long
+
+vectors.envfit <- envfit(plot, env=MB_Env_RDA)
+vectors.long <- vectorfit.long(vectors.envfit) %>%
+  filter(vector == "PO4_B")
+vectors.long
+
+```
+
+Making the plot.
+
+```{r}
+
+MB_RDA <- ggplot() + 
+      geom_vline(xintercept = c(0), color = "grey70", linetype = 2) +
+      geom_hline(yintercept = c(0), color = "grey70", linetype = 2) +  
+      xlab(axis.long[1, "label"]) +
+      ylab(axis.long[2, "label"]) +  
+      scale_x_continuous(sec.axis = dup_axis(labels=NULL, name=NULL)) +
+      scale_y_continuous(sec.axis = dup_axis(labels=NULL, name=NULL)) +    
+      geom_point(data=sites.long, 
+                 aes(x=axis1, y=axis2), 
+                 size=1) +
+      #geom_point(data=species.long_filt, 
+      #          aes(x=axis1, y=axis2), size=1.5, color="dodgerblue3", alpha=0.6) +
+      geom_text_repel(data=species.long, 
+                    aes(x=axis1*1, y=axis2*1, label=labels),
+                    color="dodgerblue4", size=2) +
+      geom_segment(data=vectors.long,
+                 aes(x=0, y=0, xend=axis1*1, yend=axis2*1), 
+                 colour="black", size=0.5, arrow=arrow(type="open", length=unit(0.15, "cm"))) +
+      geom_text_repel(data=vectors.long, 
+                    aes(x=axis1*1, y=axis2*1, label=vector),
+                    size=2,
+                    colour="black") +
+      ggsci::scale_colour_npg() +
+      theme_classic() +
+      coord_fixed(ratio=1) +
+  ggtitle("A")
+
+
+```
+
+### St. Albans Bay. 
+```{r}
+
+## selecting phytoplankton that are > 5%
+
+SA_Phyto_Date <- Phytos %>%
+  filter(Station == "SA") %>%
+  select(SampleDate) %>%
+  unique()
+  
+SA_Phyto_Keep <- Phytos %>%
+  filter(Station == "SA") %>%
+  group_by(Sample_ID, SampleDate, Genus) %>%
+  summarize(RA_BM = sum(RA_BM)) %>%
+  mutate(Keep = if_else(RA_BM >= 0.05, "Yes", "No")) %>%
+  ungroup() %>%
+  select(Genus, Keep) %>%
+  filter(Keep=="Yes") %>%
+  unique()
+
+SA_Phyto_Matrix <- Phytos %>%
+  filter(Taxonomic_group == "Cyanobacteria") %>%
+  filter(Station == "SA") %>%
+  filter(Genus %in% SA_Phyto_Keep$Genus) %>%
+  select(SampleDate, Genus, BM_ug.L) %>%
+  group_by(SampleDate, Genus) %>%
+  summarise(BM = sum(BM_ug.L)) %>%
+  pivot_wider(names_from = "Genus", values_from="BM") %>%
+  filter(SampleDate > as.Date("2021-06-01")) %>%
+  rename(Date = SampleDate)
+
+SA_Phyto_Matrix[is.na(SA_Phyto_Matrix)] <- 0
+
+SA_Seston_Matrix <- All_Combined %>%
+  select(SestonP_uML, SestonC_uML, SestonN_uML, Station, Date) %>%
+  filter(Station == "SA") %>%
+  unique() %>%
+  mutate(Seston_CP = SestonC_uML/SestonP_uML,
+         Seston_CN = SestonC_uML/SestonN_uML, 
+         Seston_NP = SestonN_uML/SestonP_uML) %>%
+  na.omit() %>%
+  select(-SestonP_uML, -SestonC_uML, -SestonN_uML, -Station) %>%
+  mutate(Date = ymd(Date)) %>%
+    filter(Date %in% SA_Phyto_Date$SampleDate)
+
+## Weather Matrix
+
+SA_Wind_RDA <- SA_Met %>%
+  mutate(Day = day(Datetime)) %>%
+  mutate(Date = make_date(Year, Month, Day)) %>%
+  select(Wind_Speed_m.s, Date) %>%
+  filter(Date %in% SA_Phyto_Date$SampleDate) %>%
+  group_by(Date) %>%
+  summarize(Wind_Speed = mean(Wind_Speed_m.s))
+
+SA_SS_RDA <- SA_Schmidt %>%
+  mutate(Day = day(datetime),
+         Month = month(datetime),
+         Year = year(datetime),
+         Date = make_date(Year, Month, Day)) %>%
+  select(SS, Date) %>%
+  filter(Date %in% SA_Phyto_Date$SampleDate) %>%
+  group_by(Date) %>%
+  summarize(SS = mean(SS))
+
+
+# Water Temp
+
+SA_WT_RDA <- SA_Profiler %>%
+  mutate(Day = day(datetime),
+         Month = month(datetime),
+         Year = year(datetime),
+         Date = make_date(Year, Month, Day)) %>%
+  select(Temp_C, Date) %>%
+  filter(Date %in% SA_Phyto_Date$SampleDate) %>%
+  group_by(Date) %>%
+  summarize(Temp_C = mean(Temp_C))
+
+# Sum Stream Flow
+SA_SF_RDA <- SA_SF_Stats %>%
+  select(Sum_SF, Date) %>%
+  filter(Date %in% SA_Phyto_Date$SampleDate) %>%
+  group_by(Date) %>%
+  summarize(Sum_SF = mean(Sum_SF)) 
+
+## Dissolved Nutrients. 
+
+DissNut_S <- read_xlsx("./DissolvedNutrients_2021.xlsx") %>%
+  filter(site != "Miss Bay") %>%
+  select(site, depth, rep, date, `NO3_mg/L`, `NH4_mg/L`, `PO4_mg/L`) %>%
+  mutate(Date = ymd(date),
+        depth = if_else(depth == "surface", "Surface", depth),
+        depth = if_else(depth == "bottom", "Bottom", depth)) %>%
+  mutate(NO3 = if_else(`NO3_mg/L` < 0, 0, `NO3_mg/L`),
+         NH4 = if_else(`NH4_mg/L`< 0, 0, `NH4_mg/L`),
+         PO4 = if_else(`PO4_mg/L` < 0, 0, `PO4_mg/L`),
+         NO3 = NO3 * 1000,
+         NH4 = NH4 * 1000,
+         PO4 = PO4 * 1000,
+         DIN = NO3 + NH4) %>%
+    na.omit() %>%
+  group_by(site, depth, Date) %>%
+  filter(depth=="Surface") %>%
+  summarize(NH4 = mean(NH4),
+            NO3 = mean(NO3),
+            PO4_S = mean(PO4),
+            DIN_S = mean(DIN)) %>%
+  ungroup() %>%
+  select(DIN_S, PO4_S, Date)
+
+DissNut_B <- read_xlsx("./DissolvedNutrients_2021.xlsx") %>%
+  filter(site != "Miss Bay") %>%
+  select(site, depth, rep, date, `NO3_mg/L`, `NH4_mg/L`, `PO4_mg/L`) %>%
+  mutate(Date = ymd(date),
+        depth = if_else(depth == "surface", "Surface", depth),
+        depth = if_else(depth == "bottom", "Bottom", depth)) %>%
+  mutate(NO3 = if_else(`NO3_mg/L` < 0, 0, `NO3_mg/L`),
+         NH4 = if_else(`NH4_mg/L`< 0, 0, `NH4_mg/L`),
+         PO4 = if_else(`PO4_mg/L` < 0, 0, `PO4_mg/L`),
+         NO3 = NO3 * 1000,
+         NH4 = NH4 * 1000,
+         PO4 = PO4 * 1000,
+         DIN = NO3 + NH4) %>%
+    na.omit() %>%
+  group_by(site, depth, Date) %>%
+  filter(depth=="Bottom") %>%
+  summarize(NH4 = mean(NH4),
+            NO3 = mean(NO3),
+            PO4_B = mean(PO4),
+            DIN_B = mean(DIN)) %>%
+  ungroup() %>%
+  select(DIN_B, PO4_B, Date)
+## Join together. 
+  
+SA_Env_RDA <- full_join(SA_SF_RDA, SA_Wind_RDA) %>%
+  full_join(., SA_WT_RDA) %>%
+  full_join(., SA_SS_RDA) %>%
+  full_join(., DissNut_S) %>%
+  full_join(., DissNut_B) %>%
+  #full_join(., MB_Seston_Matrix) %>%
+  na.omit()
+
+
+SA_Phyto_RDA <- SA_Phyto_Matrix %>%
+  filter(Date %in% SA_Env_RDA$Date) %>%
+  column_to_rownames(var="Date")
+
+SA_Phyto_RDA[is.na(SA_Phyto_RDA)] <- 0
+
+
+SA_Env_RDA <-   SA_Env_RDA %>%
+  rownames_to_column(var="Remove") %>%
+  select(-Remove) %>%
+  column_to_rownames(var="Date")
+```
+
+## Checking for Colinearity in Variables: 
+
+```{r}
+
+library(corrplot)
+
+SA_Corr = cor(SA_Env_RDA)
+corrplot(SA_Corr, method = 'number')
+
+corrplot::cor
+
+```
+
+
+## Run RDA. 
+
+```{r}
+library(BiodiversityR)
+
+SA_Phyto_RDA <- SA_Phyto_RDA %>%
+  decostand("hellinger")
+
+SA_Env_RDA <- SA_Env_RDA %>%
+  decostand("standardize")
+
+
+SA_dbrda <- dbrda(SA_Phyto_RDA ~ .,
+                    data = SA_Env_RDA,
+                  distance="bray")
+
+print(SA_dbrda)
+
+anova.cca(SA_dbrda)
+
+```
+
+
+Forward selection of the RDA
+
+
+```{r}
+# Initial RDA with ALL of the environmental data
+SA_full <- dbrda(SA_Phyto_RDA ~ .,
+                    data = SA_Env_RDA, 
+                 distance="bray")
+
+SA_null <- dbrda(SA_Phyto_RDA ~ 1, data=SA_Env_RDA, 
+                 distance="bray")
+
+modAIC <- MASS::stepAIC(SA_null,direction='forward', scope = list(lower = SA_null,
+                                                              upper = SA_full))
+
+
+SA_mod <- dbrda(SA_Phyto_RDA ~ DIN_S + DIN_B + Wind_Speed + Temp_C + PO4_S + 
+    SS + Sum_SF, 
+                data=SA_Env_RDA, distance="bray")
+
+print(SA_mod)
+
+anova.cca(SA_mod)
+
+```
+After running the forward selection model, bottom orthophosphate levels are the only important variable in Missisquoi Bay in Shaping the cyanobacteria community. 
+
+```{r}
+library(BiodiversityR)
+
+SA_mod_summary <- summary(SA_mod)
+
+SA_mod_summary$concont
+
+```
+
+
+```{r}
+
+## This code adds species scores back into the dbrda, since they are always missing. That way we can plot species on our ordination plot with the sites and environmental variables. 
+
+sppscores(SA_mod) <- SA_Phyto_RDA
+
+plot <- ordiplot(SA_mod, type = "point")
+
+```
+
+
+```{r}
+# This code chunk extracts data from the dbRDA
+
+sites.long <- sites.long(plot, env.data=SA_Env_RDA)
+
+axis.long <- axis.long(SA_mod, choices=c(1, 2))
+
+
+df <- colSums(SA_Phyto_RDA) %>%
+  as.data.frame() %>%
+  mutate(`.` = abs(`.`))
+
+
+species.long <- species.long(plot)
+species.long
+
+
+vectors.envfit <- envfit(plot, env=SA_Env_RDA)
+vectors.long <- vectorfit.long(vectors.envfit)
+vectors.long
+
+## Stream Flow is not significant. Everything else is. 
+
+```
+
+Making the plot.
+
+```{r}
+
+library(ggforce)
+library(vegan)
+library(ggrepel)
+library(BiodiversityR)
+library(cimir)
+library(ggpubr)
+library(factoextra)
+
+
+SA_RDA <- ggplot() + 
+      geom_vline(xintercept = c(0), color = "grey70", linetype = 2) +
+      geom_hline(yintercept = c(0), color = "grey70", linetype = 2) +  
+      xlab(axis.long[1, "label"]) +
+      ylab(axis.long[2, "label"]) +  
+      scale_x_continuous(sec.axis = dup_axis(labels=NULL, name=NULL)) +
+      scale_y_continuous(sec.axis = dup_axis(labels=NULL, name=NULL)) +    
+      geom_point(data=sites.long, 
+                 aes(x=axis1, y=axis2), 
+                 size=1) +
+      #geom_point(data=species.long_filt, 
+      #          aes(x=axis1, y=axis2), size=1.5, color="dodgerblue3", alpha=0.6) +
+      geom_text_repel(data=species.long, 
+                    aes(x=axis1*1, y=axis2*1, label=labels),
+                    color="dodgerblue4", size=2) +
+      geom_segment(data=vectors.long,
+                 aes(x=0, y=0, xend=axis1*1, yend=axis2*1), 
+                 colour="black", size=0.5, arrow=arrow(type="open", length=unit(0.15, "cm"))) +
+      geom_text_repel(data=vectors.long, 
+                    aes(x=axis1*1, y=axis2*1, label=vector),
+                    size=2,
+                    colour="black") +
+      ggsci::scale_colour_npg() +
+      theme_classic() +
+      coord_fixed(ratio=1) +
+  ggtitle("B")
+
+
+```
